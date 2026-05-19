@@ -52,8 +52,21 @@ const logger = winston.createLogger({
     ]
 });
 
-// -
 let twitchAccessToken = '';
+
+async function fetchBotConfig() {
+    try {
+        const [rows] = await pool.execute('SELECT config_key, config_value FROM bot_config');
+        const config = {};
+        rows.forEach(row => {
+            config[row.config_key] = row.config_value;
+        });
+        return config;
+    } catch (err) {
+        logger.error({ message: `Failed to fetch configuration map from database: ${err.message}`, context: 'BOT_CONFIG_ENGINE' });
+        return {};
+    }
+}
 
 async function getTwitchAccessToken() {
     try {
@@ -65,7 +78,7 @@ async function getTwitchAccessToken() {
             }
         });
         twitchAccessToken = response.data.access_token;
-        logger.info({ message: 'Generated new Twitch app access token.', context: 'TWITCH_API' });
+        logger.info({ message: 'Generated new Twitch app access token.', context: 'BOT_TWITCH_API' });
     } catch (error) {
         logger.error({ message: `Error fetching Twitch token: ${error.message}`, context: 'TWITCH_API' });
     }
@@ -101,12 +114,11 @@ async function getTwitchUserDetails(userId) {
         });
         return response.data.data[0] || null;
     } catch (error) {
-        logger.error({ message: `Error fetching Twitch user details: ${error.message}`, context: 'TWITCH_API' });
+        logger.error({ message: `Error fetching Twitch user details: ${error.message}`, context: 'BOT_WITCH_API' });
         return null;
     }
 }
 
-// 
 const commands = [
     new SlashCommandBuilder()
         .setName('track-add')
@@ -154,27 +166,25 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// 
 client.once('clientReady', async () => {
-    logger.info({ message: `Logged into Discord API as ${client.user.tag}`, context: 'DISCORD_LIFECYCLE' });
+    logger.info({ message: `Logged into Discord API as ${client.user.tag}`, context: 'BOT_DISCORD_LIFECYCLE' });
     await getTwitchAccessToken();
 
     await pool.execute('INSERT IGNORE INTO bot_config (config_key, config_value) VALUES (?, ?)', ['announcement_channel_id', process.env.ANNOUNCEMENT_CHANNEL_ID || '']);
     await pool.execute('INSERT IGNORE INTO bot_config (config_key, config_value) VALUES (?, ?)', ['allowed_admin_roles', '']);
     await pool.execute('INSERT IGNORE INTO bot_config (config_key, config_value) VALUES (?, ?)', ['announcement_ping_role_id', '']);
+    await pool.execute('INSERT IGNORE INTO bot_config (config_key, config_value) VALUES (?, ?)', ['live_role_id', '']);
 
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        logger.info({ message: 'Successfully published global slash commands definitions.', context: 'DISCORD_LIFECYCLE' });
+        logger.info({ message: 'Successfully published global slash commands definitions.', context: 'BOT_DISCORD_LIFECYCLE' });
     } catch (error) {
         logger.error({ message: `Failed to register slash commands: ${error.message}`, context: 'DISCORD_LIFECYCLE' });
     }
 
-    cleanupLiveRoles()
-
+    await cleanupLiveRoles();
     setInterval(checkStreams, 2 * 60 * 1000);
-
     checkStreams();
 });
 
@@ -183,20 +193,18 @@ client.on('interactionCreate', async interaction => {
     const { commandName, options, user, member } = interaction;
 
     try {
-        const adminCommands = ['track-add', 'track-remove', 'track-clear', 'keyword-add', 'keyword-remove', 'track-list', 'keyword-list'];
+        const adminCommands = ['track-add', 'track-remove', 'track-clear', 'keyword-add', 'keyword-remove', 'track-list', 'keyword-list', 'ping', 'help'];
         
         if (adminCommands.includes(commandName)) {
-            const [configRows] = await pool.execute('SELECT config_value FROM bot_config WHERE config_key = "allowed_admin_roles"');
-            const allowedRolesString = configRows[0]?.config_value || '';
-            
+            const botConfig = await fetchBotConfig();
+            const allowedRolesString = botConfig['allowed_admin_roles'] || '';
             const allowedRoleIds = allowedRolesString.split(',').map(id => id.trim()).filter(id => id.length > 0);
 
             const isServerAdmin = member.permissions.has(PermissionFlagsBits.Administrator);
-
             const hasCustomRole = member.roles.cache.some(role => allowedRoleIds.includes(role.id));
 
             if (!isServerAdmin && !hasCustomRole) {
-                logger.warn({ message: `Unauthorized interaction attempt for /${commandName} by user ${user.tag}`, context: 'SECURITY_GUARD' });
+                logger.warn({ message: `Unauthorized interaction attempt for /${commandName} by user ${user.tag}`, context: 'BOT_SECURITY_GUARD' });
                 await interaction.reply({ content: '🚫 You do not have permission to use this management command.', ephemeral: true });
                 return;
             }
@@ -225,34 +233,34 @@ client.on('interactionCreate', async interaction => {
             const targetUser = options.getUser('user');
             const twitchUsername = options.getString('twitch').toLowerCase().trim();
             await pool.execute('INSERT INTO tracked_users (discord_id, twitch_username) VALUES (?, ?) ON DUPLICATE KEY UPDATE twitch_username = VALUES(twitch_username)', [targetUser.id, twitchUsername]);
-            logger.info({ message: `Admin ${user.tag} tracked user ${targetUser.tag} -> Twitch: ${twitchUsername}`, context: 'COMMAND_TRACK' });
+            logger.info({ message: `${user.tag} tracked user ${targetUser.tag} -> Twitch: ${twitchUsername}`, context: 'BOT_COMMAND_TRACK' });
             await interaction.reply(`🎯 Tracked **${targetUser.username}** matching Twitch account: \`${twitchUsername}\`.`);
         }
 
         if (commandName === 'track-remove') {
             const targetUser = options.getUser('user');
             await pool.execute('DELETE FROM tracked_users WHERE discord_id = ?', [targetUser.id]);
-            logger.info({ message: `Admin ${user.tag} removed user ${targetUser.tag} from tracking.`, context: 'COMMAND_TRACK' });
+            logger.info({ message: `${user.tag} removed user ${targetUser.tag} from tracking.`, context: 'BOT_COMMAND_TRACK' });
             await interaction.reply(`❌ Removed **${targetUser.username}** from tracking.`);
         }
 
         if (commandName === 'track-clear') {
             await pool.execute('DELETE FROM tracked_users');
-            logger.warn({ message: `Admin ${user.tag} purged the tracking database table.`, context: 'COMMAND_TRACK' });
+            logger.warn({ message: `${user.tag} purged the tracking database table.`, context: 'BOT_COMMAND_TRACK' });
             await interaction.reply('🧹 Entire Twitch tracking table has been wiped clean.');
         }
 
         if (commandName === 'keyword-add') {
             const word = options.getString('keyword').toLowerCase().trim();
             await pool.execute('INSERT IGNORE INTO keywords (keyword) VALUES (?)', [word]);
-            logger.info({ message: `Admin ${user.tag} added keyword filter: ${word}`, context: 'COMMAND_KEYWORD' });
+            logger.info({ message: `${user.tag} added keyword filter: ${word}`, context: 'BOT_COMMAND_KEYWORD' });
             await interaction.reply(`✅ Keyword \`${word}\` is now active.`);
         }
 
         if (commandName === 'keyword-remove') {
             const word = options.getString('keyword').toLowerCase().trim();
             await pool.execute('DELETE FROM keywords WHERE keyword = ?', [word]);
-            logger.info({ message: `Admin ${user.tag} removed keyword filter: ${word}`, context: 'COMMAND_KEYWORD' });
+            logger.info({ message: `${user.tag} removed keyword filter: ${word}`, context: 'BOT_COMMAND_KEYWORD' });
             await interaction.reply(`❌ Removed keyword: \`${word}\``);
         }
 
@@ -268,45 +276,42 @@ client.on('interactionCreate', async interaction => {
             await interaction.reply(`**Active Keywords for Stream Title Filtering:**\n${kwsList}`);
         }   
     } catch (dbError) {
-        logger.error({ message: `Command error "/${commandName}" by ${user.tag}: ${dbError.message}`, context: 'COMMAND_ERROR' });
+        logger.error({ message: `Command error "/${commandName}" by ${user.tag}: ${dbError.message}`, context: 'BOT_COMMAND_ERROR' });
     }
 });
 
-// --- NEW: STARTUP CLEANUP ROUTINE ---
 async function cleanupLiveRoles() {
-    logger.info({ message: 'Initiating startup cleanup routine.', context: 'CLEANUP_ENGINE' });
+    logger.info({ message: 'Initiating startup cleanup routine.', context: 'BOT_CLEANUP_ENGINE' });
     const guild = client.guilds.cache.first();
-    if (!guild) return logger.info({ message: 'No guild detected in cache yet.', context: 'CLEANUP_ENGINE' });
+    if (!guild) return logger.info({ message: 'No guild detected in cache yet.', context: 'BOT_CLEANUP_ENGINE' });
 
-    const roleId = process.env.LIVE_ROLE_ID;
+    const botConfig = await fetchBotConfig();
+    const roleId = botConfig['live_role_id'];
+    if (!roleId) return logger.warn({ message: 'Live role ID not set in database config table. Skipping cleanup.', context: 'BOT_CLEANUP_ENGINE' });
+
     const role = guild.roles.cache.get(roleId);
-    if (!role) return logger.error({ message: `Live Role ID "${roleId}" not found in server.`, context: 'CLEANUP_ENGINE' });
+    if (!role) return logger.error({ message: `Live Role ID "${roleId}" not found in server.`, context: 'BOT_CLEANUP_ENGINE' });
+    
     try {
-        // 1. Reset all stream session tracking locks in the database
         await pool.execute('UPDATE tracked_users SET last_stream_id = NULL');
-        logger.info({ message: 'All MySQL last_stream_id stream locks have been reset to NULL.', context: 'CLEANUP_ENGINE' });
-
-        // 2. Fetch all members who currently have the live role assigned
-        // We use fetch() here instead of cache to guarantee we bypass old Discord client states
+        logger.info({ message: 'All MySQL last_stream_id stream locks have been reset to NULL.', context: 'BOT_CLEANUP_ENGINE' });
         const membersWithRole = await guild.members.fetch().then(members => 
             members.filter(member => member.roles.cache.has(roleId))
         );
 
         if (membersWithRole.size === 0) {
-            logger.info({ message: 'No members with ghost Live roles detected during cleanup.', context: 'CLEANUP_ENGINE' });
+            logger.info({ message: 'No members with ghost Live roles detected during cleanup.', context: 'BOT_CLEANUP_ENGINE' });
             return;
         }
 
-        logger.info({ message: `Found ${membersWithRole.size} members with ghost live roles. Stripping roles now...`, context: 'CLEANUP_ENGINE' });
-
-        // 3. Loop through and strip the role from those members
+        logger.info({ message: `Found ${membersWithRole.size} members with ghost live roles. Stripping roles now...`, context: 'BOT_CLEANUP_ENGINE' });
         for (const [id, member] of membersWithRole) {
             await member.roles.remove(role);
-            logger.info({ message: `Stripped ghost Live role from ${member.user.tag} during boot cleanup`, context: 'CLEANUP_ENGINE' });
+            logger.info({ message: `Stripped ghost Live role from ${member.user.tag} during boot cleanup`, context: 'BOT_CLEANUP_ENGINE' });
         }
 
     } catch (err) {
-        logger.error({ message: `Failed to complete boot cleanup sequence: ${err.message}`, context: 'CLEANUP_ENGINE' });
+        logger.error({ message: `Failed to complete boot cleanup sequence: ${err.message}`, context: 'BOT_CLEANUP_ENGINE' });
     }
 }
 
@@ -316,47 +321,49 @@ async function checkStreams() {
         try {
             const guilds = await client.guilds.fetch();
             if (guilds.size === 0) {
-                logger.warn({ message: '[LOOP ABORT] Bot is not joined to any Discord servers.', context: 'LOOP_STATUS' });
+                logger.warn({ message: 'Bot is not joined to any Discord servers.', context: 'BOT_LOOP_STATUS' });
                 return;
             }
             guild = await guilds.first().fetch();
         } catch (fetchErr) {
-            logger.error({ message: `[LOOP ERROR] Failed to fetch guild architecture: ${fetchErr.message}`, context: 'LOOP_ERROR' });
+            logger.error({ message: `Failed to fetch guild architecture: ${fetchErr.message}`, context: 'LOOP_ERROR' });
             return;
         }
     }
 
-    // 2. Validate Role Configuration
-    const roleId = process.env.LIVE_ROLE_ID;
+    const botConfig = await fetchBotConfig();
+    const roleId = botConfig['live_role_id'];
+    if (!roleId) {
+        logger.warn({ message: 'Skipping stream loop execution: "live_role_id" is missing from the bot_config database table.', context: 'BOT_CONFIG_VALIDATION' });
+        return;
+    }
+
     const role = guild.roles.cache.get(roleId);
     if (!role) {
-        logger.error({ message: `Critical configuration error: Live role ID "${roleId}" not found in guild. Please check your environment variables and ensure the role exists.`, context: 'CONFIG_VALIDATION' });
+        logger.error({ message: `Critical configuration error: Live role ID "${roleId}" not found in guild. Please fix your bot_config entry.`, context: 'BOT_CONFIG_VALIDATION' });
         return;
     }
 
     try {
-        // 3. Fetch configurations and check database records
         const [users] = await pool.execute('SELECT * FROM tracked_users');
         const [kwsRows] = await pool.execute('SELECT * FROM keywords');
         const kws = kwsRows.map(k => k.keyword);
 
         if (users.length === 0) {
-            logger.warn({ message: 'No users registered in the "tracked_users" database table. Use /track-add to start tracking Twitch streamers.', context: 'LOOP_STATUS' });
+            logger.warn({ message: 'No users registered in the "tracked_users" database table. Use /track-add to start tracking Twitch streamers.', context: 'BOT_LOOP_STATUS' });
             return;
         }
 
-        const [configRows] = await pool.execute('SELECT config_value FROM bot_config WHERE config_key = "announcement_channel_id"');
-        const channelId = configRows[0]?.config_value;
+        const channelId = botConfig['announcement_channel_id'];
         const announcementChannel = guild.channels.cache.get(channelId);
         if (!announcementChannel) {
-            logger.warn({ message: `Announcement channel ID "${channelId}" not found in cache. Announcements will be skipped.`, context: 'LOOP_STATUS' });
+            logger.warn({ message: `Announcement channel ID "${channelId}" not found in cache. Announcements will be skipped.`, context: 'BOT_LOOP_STATUS' });
         }
 
-        const [pingConfigRows] = await pool.execute('SELECT config_value FROM bot_config WHERE config_key = "announcement_ping_role_id"');
-        const pingRoleId = pingConfigRows[0]?.config_value;
+        const pingRoleId = botConfig['announcement_ping_role_id'];
         const pingRole = guild.roles.cache.get(pingRoleId);
         if (!pingRole) {
-            logger.warn({ message: `Announcement ping role ID "${pingRoleId}" not found in cache. Announcement pings will be skipped.`, context: 'LOOP_STATUS' });
+            logger.warn({ message: `Announcement ping role ID "${pingRoleId}" not found in cache. Announcement pings will be skipped.`, context: 'BOT_LOOP_STATUS' });
         }
 
         const twitchToUserMap = new Map();
@@ -380,7 +387,7 @@ async function checkStreams() {
                 if (matchesKeywords) {
                     if (!member.roles.cache.has(roleId)) {
                         await member.roles.add(role);
-                        logger.info({ message: `Applied Live Role to ${member.user.tag}`, context: 'LIVE_ENGINE' });
+                        logger.info({ message: `Applied Live Role to ${member.user.tag}`, context: 'BOT_LIVE_ENGINE' });
                     }
 
                     if (dbUserObj.last_stream_id !== stream.id) {
@@ -395,7 +402,7 @@ async function checkStreams() {
                                 .setColor('#9146FF')
                                 .setTitle(stream.title)
                                 .setURL(`https://twitch.tv/${stream.user_login}`)
-                                .setAuthor({ name: `${stream.user_name} is now LIVE on Twitch!`, iconURL: profileImageUrl, url: `https://twitch.tv/${stream.user_login}` })
+                                .setAuthor({ name: `${member.user.displayName} is now LIVE on Twitch!`, iconURL: profileImageUrl, url: `https://twitch.tv/${stream.user_login}` })
                                 .addFields(
                                     { name: '🎮 Playing', value: stream.game_name || 'Just Chatting', inline: true },
                                     { name: '👥 Viewers', value: String(stream.viewer_count), inline: true }
@@ -404,23 +411,23 @@ async function checkStreams() {
                                 .setThumbnail(profileImageUrl)
                                 .setTimestamp();
                             
-                            let content = `**${stream.user_name}** is now live! Go show some support! \n<https://twitch.tv/${stream.user_login}>`;
+                            let content = `**${member.user.displayName}** is now live! Go show some support! \n<https://twitch.tv/${stream.user_login}>`;
                             if (pingRole) {
                                 content = `${pingRole.toString()}\n${content}`;
                             }
                         
                             await announcementChannel.send({ content, embeds: [embed] });
-                            logger.info({ message: `Dispatched live announcement embed for channel ${stream.user_login}`, context: 'LIVE_ENGINE' });
+                            logger.info({ message: `Dispatched live announcement embed for channel ${stream.user_login}`, context: 'BOT_LIVE_ENGINE' });
                         }
                     }
                 } else {
                     if (member.roles.cache.has(roleId)) {
                         await member.roles.remove(role);
-                        logger.info({ message: `Stripped Live Role from ${member.user.tag} - Title did not match keywords.`, context: 'LIVE_ENGINE' });
+                        logger.info({ message: `Stripped Live Role from ${member.user.tag} - Title did not match keywords.`, context: 'BOT_LIVE_ENGINE' });
                     }
                 }
             } catch (memberErr) {
-                logger.error({ message: `Failed to process server updates for Discord User ID ${dbUserObj.discord_id}:`, context: 'LIVE_ENGINE' });
+                logger.error({ message: `Failed to process server updates for Discord User ID ${dbUserObj.discord_id}: ${memberErr.message}`, context: 'BOT_LIVE_ENGINE' });
             }
         }
 
@@ -430,7 +437,7 @@ async function checkStreams() {
                     const member = await guild.members.fetch(user.discord_id);
                     if (member.roles.cache.has(roleId)) {
                         await member.roles.remove(role);
-                        logger.info({ message: `Removed role from offline channel: ${user.twitch_username}`, context: 'LIVE_ENGINE' });
+                        logger.info({ message: `Removed role from offline channel: ${user.twitch_username}`, context: 'BOT_LIVE_ENGINE' });
                     }
                 } catch (memberErr) {}
 
@@ -441,7 +448,7 @@ async function checkStreams() {
         }
 
     } catch (err) {
-        logger.error({ message: `Fatal runtime error inside live loop calculation step: ${err.message}`, context: 'LIVE_ENGINE' });
+        logger.error({ message: `Fatal runtime error inside live loop calculation step: ${err.message}`, context: 'BOT_LIVE_ENGINE' });
     }
 }
 
