@@ -281,7 +281,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 async function cleanupLiveRoles() {
-    logger.info({ message: 'Initiating startup cleanup routine.', context: 'BOT_CLEANUP_ENGINE' });
+    logger.info({ message: 'Initiating cleanup routine.', context: 'BOT_CLEANUP_ENGINE' });
     const guild = client.guilds.cache.first();
     if (!guild) return logger.info({ message: 'No guild detected in cache yet.', context: 'BOT_CLEANUP_ENGINE' });
 
@@ -351,6 +351,7 @@ async function checkStreams() {
 
         if (users.length === 0) {
             logger.warn({ message: 'No users registered in the "tracked_users" database table. Use /track-add to start tracking Twitch streamers.', context: 'BOT_LOOP_STATUS' });
+            cleanupLiveRoles();
             return;
         }
 

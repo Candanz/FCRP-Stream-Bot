@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS bot_config (
     config_value TEXT NOT NULL
 );
 
-INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('announcement_channel_id', '1506152347301187706');
-INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('allowed_admin_roles', '897729455101984818');
-INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('announcement_ping_role_id', '897729481559666738');
+INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('announcement_channel_id', '');
+INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('allowed_admin_roles', '');
+INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('announcement_ping_role_id', '');
+INSERT IGNORE INTO bot_config (config_key, config_value) VALUES ('live_role_id', '');
